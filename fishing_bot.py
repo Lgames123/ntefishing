@@ -248,6 +248,33 @@ def get_scaled_roi(window_rect):
         "height": roi_h
     }
 
+# Centered banner ROI at 3440x1440px reference
+REF_BANNER_ROI_W = 1200
+REF_BANNER_ROI_H = 600
+REF_BANNER_ROI_X = 1120
+REF_BANNER_ROI_Y = 420
+
+def get_scaled_banner_roi(window_rect):
+    """Calculates the screen crop coordinates for the central banner at any resolution."""
+    x1, y1, x2, y2 = window_rect
+    w = x2 - x1
+    h = y2 - y1
+    
+    scale_x = w / float(REF_W)
+    scale_y = h / float(REF_H)
+    
+    roi_w = int(REF_BANNER_ROI_W * scale_x)
+    roi_h = int(REF_BANNER_ROI_H * scale_y)
+    roi_x = x1 + int(REF_BANNER_ROI_X * scale_x)
+    roi_y = y1 + int(REF_BANNER_ROI_Y * scale_y)
+    
+    return {
+        "top": roi_y,
+        "left": roi_x,
+        "width": roi_w,
+        "height": roi_h
+    }
+
 # ==============================================================================
 # STATE, TOGGLE & INTERACTIVE GUI CALLBACKS
 # ==============================================================================
@@ -282,16 +309,17 @@ def on_mouse_click(event, x, y, flags, param):
 STATE_IDLE = "IDLE"                         # Hook icon is visible, ready to cast
 STATE_CASTING = "CASTING"                   # Temporary state/cooldown after casting
 STATE_WAITING_FOR_BITE = "WAITING_FOR_BITE" # Hook is cast, waiting for fish to bite
-STATE_STRIKING = "STRIKING"                 # Temporary state/cooldown after reel-in key
 STATE_CATCHING = "CATCHING"                 # Keeping the yellow marker inside green bounds
 STATE_END_SCREEN = "END_SCREEN"             # Fishing ended, waiting to click and close
 
 try:
     template_idle = cv2.imread('resources/hook_idle.png')
     template_bite = cv2.imread('resources/hook_bite.png')
-    if template_idle is None or template_bite is None:
-        print("[WARNING] Failed to load resources/hook_idle.png or resources/hook_bite.png!")
-        print("Template matching will be unavailable.")
+    template_bite_blue_ring = cv2.imread('resources/hook_bite_blue_ring.png')
+    template_banner = cv2.imread('resources/fish_on_hook_banner.png')
+    if template_idle is None or template_bite is None or template_bite_blue_ring is None or template_banner is None:
+        print("[WARNING] Failed to load one or more resources/ templates!")
+        print("Template matching may be incomplete or unavailable.")
 except Exception as e:
     print(f"[WARNING] Error loading templates: {e}")
 
@@ -325,11 +353,13 @@ def main():
     # State Machine state variables
     current_state = STATE_IDLE
     state_cooldown_until = 0.0
+    catching_started_time = 0.0
     catching_lost_detection_start = 0.0
     catching_ended_time = 0.0
     
     max_val_idle = 0.0
     max_val_bite = 0.0
+    max_val_banner = 0.0
     
     try:
         with mss.mss() as sct:
@@ -365,71 +395,74 @@ def main():
                     state_cooldown_until = 0.0
                     catching_lost_detection_start = 0.0
                 
-                # 2. Capture dynamic ROI (fishing bar)
-                monitor = get_scaled_roi(rect)
-                try:
-                    screenshot = np.array(sct.grab(monitor))
-                except Exception:
-                    update_keys(hwnd, False, False)
-                    time.sleep(0.5)
-                    continue
-                    
-                roi_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
-                img = cv2.resize(roi_bgr, (REF_ROI_W, REF_ROI_H), interpolation=cv2.INTER_LINEAR)
-                
-                # 3. HSV masking for fishing bar
-                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-                yellow_mask = cv2.inRange(hsv, LOWER_YELLOW, UPPER_YELLOW)
-                green_mask = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
-                
-                # 4. Contour detection for fishing bar
-                yellow_contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                green_contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
-                # Filter Yellow Marker
+                # Initialize detection variables
                 yellow_marker = None
-                for cnt in yellow_contours:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    aspect_ratio = h / float(w) if w > 0 else 0
-                    area = cv2.contourArea(cnt)
-                    if aspect_ratio > 1.5 and w < 20 and 50 < area < 500:
-                        yellow_marker = (x, y, w, h)
-                        break
-                        
-                # Filter Green Rectangle
                 green_rect = None
-                max_green_area = -1
-                for cnt in green_contours:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    aspect_ratio = w / float(h) if h > 0 else 0
-                    area = cv2.contourArea(cnt)
-                    if aspect_ratio > 2.0 and w > 50 and area > 500:
-                        if area > max_green_area:
-                            max_green_area = area
-                            green_rect = (x, y, w, h)
-                
-                # 5. Capture resolution-independent HUD ROI (hook area)
-                scale_x = win_w / float(REF_W)
-                scale_y = win_h / float(REF_H)
-                
-                hud_w = int(1032 * scale_x)
-                hud_h = int(576 * scale_y)
-                hud_x = int(2408 * scale_x)
-                hud_y = int(864 * scale_y)
-                
-                hud_monitor = {
-                    "top": y1 + hud_y,
-                    "left": x1 + hud_x,
-                    "width": hud_w,
-                    "height": hud_h
-                }
-                
                 max_val_idle = 0.0
                 max_val_bite = 0.0
+                max_val_banner = 0.0
                 
-                # Dynamic Optimization: Skip HUD template matching during STRIKING and CATCHING phases to save CPU and run at maximum speed
-                if current_state not in [STATE_STRIKING, STATE_CATCHING]:
-                    if template_idle is not None and template_bite is not None:
+                # 2. Dynamic State-Driven Captures
+                if current_state == STATE_CATCHING:
+                    # Capture dynamic ROI (fishing bar) ONLY during catching
+                    monitor = get_scaled_roi(rect)
+                    try:
+                        screenshot = np.array(sct.grab(monitor))
+                    except Exception:
+                        update_keys(hwnd, False, False)
+                        time.sleep(0.5)
+                        continue
+                        
+                    roi_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+                    img = cv2.resize(roi_bgr, (REF_ROI_W, REF_ROI_H), interpolation=cv2.INTER_LINEAR)
+                    
+                    # HSV masking for fishing bar
+                    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+                    yellow_mask = cv2.inRange(hsv, LOWER_YELLOW, UPPER_YELLOW)
+                    green_mask = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
+                    
+                    # Contour detection for fishing bar
+                    yellow_contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    green_contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    # Filter Yellow Marker
+                    for cnt in yellow_contours:
+                        x, y, w, h = cv2.boundingRect(cnt)
+                        aspect_ratio = h / float(w) if w > 0 else 0
+                        area = cv2.contourArea(cnt)
+                        if aspect_ratio > 1.5 and w < 20 and 50 < area < 500:
+                            yellow_marker = (x, y, w, h)
+                            break
+                            
+                    # Filter Green Rectangle
+                    max_green_area = -1
+                    for cnt in green_contours:
+                        x, y, w, h = cv2.boundingRect(cnt)
+                        aspect_ratio = w / float(h) if h > 0 else 0
+                        area = cv2.contourArea(cnt)
+                        if aspect_ratio > 2.0 and w > 50 and area > 500:
+                            if area > max_green_area:
+                                max_green_area = area
+                                green_rect = (x, y, w, h)
+                                
+                elif current_state == STATE_IDLE:
+                    # Capture HUD region ONLY when idle to detect cast readiness
+                    scale_x = win_w / float(REF_W)
+                    scale_y = win_h / float(REF_H)
+                    
+                    hud_w = int(1032 * scale_x)
+                    hud_h = int(576 * scale_y)
+                    hud_x = int(2408 * scale_x)
+                    hud_y = int(864 * scale_y)
+                    
+                    hud_monitor = {
+                        "top": y1 + hud_y,
+                        "left": x1 + hud_x,
+                        "width": hud_w,
+                        "height": hud_h
+                    }
+                    
+                    if template_idle is not None:
                         try:
                             hud_grab = np.array(sct.grab(hud_monitor))
                             hud_bgr = cv2.cvtColor(hud_grab, cv2.COLOR_BGRA2BGR)
@@ -438,23 +471,66 @@ def main():
                             # Match Idle
                             res_idle = cv2.matchTemplate(hud_resized, template_idle, cv2.TM_CCOEFF_NORMED)
                             _, max_val_idle, _, _ = cv2.minMaxLoc(res_idle)
+                        except Exception:
+                            pass
                             
-                            # Match Bite
-                            res_bite = cv2.matchTemplate(hud_resized, template_bite, cv2.TM_CCOEFF_NORMED)
-                            _, max_val_bite, _, _ = cv2.minMaxLoc(res_bite)
-                        except Exception as e:
+                elif current_state == STATE_WAITING_FOR_BITE:
+                    # Capture HUD and Banner regions ONLY when waiting for a bite
+                    scale_x = win_w / float(REF_W)
+                    scale_y = win_h / float(REF_H)
+                    
+                    # Bounding box for HUD
+                    hud_w = int(1032 * scale_x)
+                    hud_h = int(576 * scale_y)
+                    hud_x = int(2408 * scale_x)
+                    hud_y = int(864 * scale_y)
+                    
+                    hud_monitor = {
+                        "top": y1 + hud_y,
+                        "left": x1 + hud_x,
+                        "width": hud_w,
+                        "height": hud_h
+                    }
+                    
+                    # Bounding box for Central Banner
+                    banner_monitor = get_scaled_banner_roi(rect)
+                    
+                    # Match Hook templates in HUD
+                    if template_bite is not None or template_bite_blue_ring is not None:
+                        try:
+                            hud_grab = np.array(sct.grab(hud_monitor))
+                            hud_bgr = cv2.cvtColor(hud_grab, cv2.COLOR_BGRA2BGR)
+                            hud_resized = cv2.resize(hud_bgr, (1032, 576), interpolation=cv2.INTER_LINEAR)
+                            
+                            # Match standard flashing bite
+                            if template_bite is not None:
+                                res_bite = cv2.matchTemplate(hud_resized, template_bite, cv2.TM_CCOEFF_NORMED)
+                                _, score_bite, _, _ = cv2.minMaxLoc(res_bite)
+                                max_val_bite = max(max_val_bite, score_bite)
+                                
+                            # Match blue-ringed bite
+                            if template_bite_blue_ring is not None:
+                                res_blue_ring = cv2.matchTemplate(hud_resized, template_bite_blue_ring, cv2.TM_CCOEFF_NORMED)
+                                _, score_blue_ring, _, _ = cv2.minMaxLoc(res_blue_ring)
+                                max_val_bite = max(max_val_bite, score_blue_ring)
+                        except Exception:
+                            pass
+                            
+                    # Match Central Banner template
+                    if template_banner is not None:
+                        try:
+                            banner_grab = np.array(sct.grab(banner_monitor))
+                            banner_bgr = cv2.cvtColor(banner_grab, cv2.COLOR_BGRA2BGR)
+                            banner_resized = cv2.resize(banner_bgr, (1200, 600), interpolation=cv2.INTER_LINEAR)
+                            
+                            res_banner = cv2.matchTemplate(banner_resized, template_banner, cv2.TM_CCOEFF_NORMED)
+                            _, max_val_banner, _, _ = cv2.minMaxLoc(res_banner)
+                        except Exception:
                             pass
                 
-                # 6. State Machine Processing (when active)
+                # 3. State Machine Processing (when active)
                 action = "WAITING"
                 if bot_active:
-                    # Smart Start / Autorecovery: if we see minigame active, immediately snap to CATCHING
-                    if current_state in [STATE_IDLE, STATE_WAITING_FOR_BITE] and yellow_marker and green_rect:
-                        print("[STATE] Active minigame detected! Auto-recovering state to CATCHING.")
-                        current_state = STATE_CATCHING
-                        catching_lost_detection_start = 0.0
-                    
-                    # Run state machine FSM
                     in_cooldown = current_time < state_cooldown_until
                     
                     if not in_cooldown:
@@ -471,19 +547,22 @@ def main():
                             print("[STATE] Transitioning to WAITING FOR BITE...")
                             
                         elif current_state == STATE_WAITING_FOR_BITE:
-                            if max_val_bite > 0.78:
-                                print(f"[STATE] Glowing Bite Hook detected ({max_val_bite:.2f})! Striking (Press F)...")
+                            is_bite = (max_val_bite > 0.78) or (max_val_banner > 0.78)
+                            if is_bite:
+                                if max_val_bite > 0.78:
+                                    print(f"[STATE] Bite Hook detected ({max_val_bite:.2f})! Striking (Press F)...")
+                                else:
+                                    print(f"[STATE] Central Banner detected ({max_val_banner:.2f})! Striking (Press F)...")
+                                    
                                 press_key_f(hwnd)
-                                current_state = STATE_STRIKING
-                                state_cooldown_until = current_time + 2.5  # 2.5s strike cooldown to let bar appear
+                                current_state = STATE_CATCHING
+                                catching_started_time = current_time
+                                catching_lost_detection_start = 0.0
+                                print("[STATE] Transitioned DIRECTLY to CATCHING state.")
                                 
-                        elif current_state == STATE_STRIKING:
-                            # Strike cooldown finished, enter catching phase
-                            current_state = STATE_CATCHING
-                            catching_lost_detection_start = 0.0
-                            print("[STATE] Entering minigame CATCHING state...")
-                            
                         elif current_state == STATE_CATCHING:
+                            in_grace_period = (current_time - catching_started_time < 3.0)
+                            
                             if yellow_marker and green_rect:
                                 catching_lost_detection_start = 0.0  # Reset lost detection
                                 yx = yellow_marker[0] + yellow_marker[2] / 2.0
@@ -497,15 +576,19 @@ def main():
                                 else:
                                     action = "STAY"
                             else:
-                                # Lost detection temporarily, check if sustained
-                                if catching_lost_detection_start == 0.0:
-                                    catching_lost_detection_start = current_time
-                                elif current_time - catching_lost_detection_start >= 1.5:
-                                    print("[STATE] Fishing minigame ended (detection lost). Transitioning to END_SCREEN...")
-                                    update_keys(hwnd, False, False)
-                                    current_state = STATE_END_SCREEN
-                                    catching_ended_time = current_time
-                                    
+                                if in_grace_period:
+                                    # Grace period: let UI load, maintain status quo
+                                    action = "STAY"
+                                else:
+                                    # Lost detection temporarily, check if sustained
+                                    if catching_lost_detection_start == 0.0:
+                                        catching_lost_detection_start = current_time
+                                    elif current_time - catching_lost_detection_start >= 1.5:
+                                        print("[STATE] Fishing minigame ended (detection lost). Transitioning to END_SCREEN...")
+                                        update_keys(hwnd, False, False)
+                                        current_state = STATE_END_SCREEN
+                                        catching_ended_time = current_time
+                                        
                         elif current_state == STATE_END_SCREEN:
                             if current_time - catching_ended_time >= 5.0:
                                 print("[STATE] End-screen wait completed. Sending ESC keypress to dismiss screen...")
@@ -513,7 +596,7 @@ def main():
                                 current_state = STATE_IDLE
                                 state_cooldown_until = current_time + 2.5  # 2.5s cooldown to let HUD load
                 
-                # 7. Apply Key Inputs (if in Catching phase and active)
+                # 4. Apply Key Inputs (if in Catching phase and active)
                 if bot_active and current_state == STATE_CATCHING:
                     if action == "PULL LEFT":
                         update_keys(hwnd, True, False)
@@ -524,25 +607,28 @@ def main():
                 else:
                     update_keys(hwnd, False, False)
                 
-                # 8. Visualization Overlay
+                # 5. Visualization Overlay
                 if SHOW_DEBUG_WINDOW:
-                    vis = img.copy()
-                    
-                    # Draw Green Bounds
-                    if green_rect:
-                        x, y, w, h = green_rect
-                        cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                        cv2.putText(vis, "Green Bounds", (x, y-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                        # Draw safety margins
-                        cv2.line(vis, (x + SAFETY_MARGIN, y), (x + SAFETY_MARGIN, y+h), (0, 200, 200), 1, cv2.LINE_AA)
-                        cv2.line(vis, (x + w - SAFETY_MARGIN, y), (x + w - SAFETY_MARGIN, y+h), (0, 200, 200), 1, cv2.LINE_AA)
-                    
-                    # Draw Yellow Marker
-                    if yellow_marker:
-                        x, y, w, h = yellow_marker
-                        cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 0, 255), 2)
-                        cv2.putText(vis, "Marker", (x, y-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    
+                    if current_state == STATE_CATCHING:
+                        vis = img.copy()
+                        # Draw Green Bounds
+                        if green_rect:
+                            x, y, w, h = green_rect
+                            cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                            cv2.putText(vis, "Green Bounds", (x, y-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            # Draw safety margins
+                            cv2.line(vis, (x + SAFETY_MARGIN, y), (x + SAFETY_MARGIN, y+h), (0, 200, 200), 1, cv2.LINE_AA)
+                            cv2.line(vis, (x + w - SAFETY_MARGIN, y), (x + w - SAFETY_MARGIN, y+h), (0, 200, 200), 1, cv2.LINE_AA)
+                        
+                        # Draw Yellow Marker
+                        if yellow_marker:
+                            x, y, w, h = yellow_marker
+                            cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                            cv2.putText(vis, "Marker", (x, y-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    else:
+                        # Non-catching states get a black dashboard background
+                        vis = np.zeros((REF_ROI_H, REF_ROI_W, 3), dtype=np.uint8)
+                        
                     # Draw Interactive Close Button [EXIT] at top right
                     cv2.rectangle(vis, (1240, 20), (1368, 80), (50, 50, 220), -1, cv2.LINE_AA)  # Red background
                     cv2.rectangle(vis, (1240, 20), (1368, 80), (255, 255, 255), 2, cv2.LINE_AA)  # White border
@@ -557,7 +643,7 @@ def main():
                     cv2.putText(vis, f"Action: {action}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     
                     # Match correlation diagnostics
-                    cv2.putText(vis, f"Idle Match: {max_val_idle:.2f}  Bite Match: {max_val_bite:.2f}", 
+                    cv2.putText(vis, f"Idle Match: {max_val_idle:.2f}  Bite Match: {max_val_bite:.2f}  Banner Match: {max_val_banner:.2f}", 
                                 (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                     
                     # Draw countdown timer info if in cooldown or waiting
@@ -568,6 +654,9 @@ def main():
                         elif current_state == STATE_END_SCREEN:
                             rem = max(0.0, 5.0 - (current_time - catching_ended_time))
                             cv2.putText(vis, f"Auto-Click in: {rem:.1f}s", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                        elif current_state == STATE_CATCHING and (current_time - catching_started_time < 3.0):
+                            rem = max(0.0, 3.0 - (current_time - catching_started_time))
+                            cv2.putText(vis, f"Grace Period: {rem:.1f}s", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                     
                     # Resize to half footprint
                     debug_show = cv2.resize(vis, (REF_ROI_W // 2, REF_ROI_H // 2))
@@ -587,8 +676,8 @@ def main():
                         print("\nExiting bot loop...")
                         break
                 
-                # 9. Dynamic Polling Rate: sleep based on active reeling/catching/striking state
-                active_delay = LOOP_DELAY_CATCHING if current_state in [STATE_STRIKING, STATE_CATCHING] else LOOP_DELAY_DEFAULT
+                # 6. Dynamic Polling Rate: sleep based on active catching state
+                active_delay = LOOP_DELAY_CATCHING if current_state == STATE_CATCHING else LOOP_DELAY_DEFAULT
                 time.sleep(active_delay)
                 
     except KeyboardInterrupt:
