@@ -550,9 +550,9 @@ def main():
                             print("[STATE] Transitioning to WAITING FOR BITE...")
                             
                         elif current_state == STATE_WAITING_FOR_BITE:
-                            is_bite = (max_val_blue_ring > 0.78) or (max_val_banner > 0.78)
+                            is_bite = (max_val_blue_ring > 0.95) or (max_val_banner > 0.78)
                             if is_bite:
-                                if max_val_blue_ring > 0.78:
+                                if max_val_blue_ring > 0.95:
                                     print(f"[STATE] Bite Hook (Blue Ring) detected ({max_val_blue_ring:.2f})! Striking (Press F)...")
                                 else:
                                     print(f"[STATE] Central Banner detected ({max_val_banner:.2f})! Striking (Press F)...")
