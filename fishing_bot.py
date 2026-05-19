@@ -103,10 +103,26 @@ def update_keys(hwnd, a_down, d_down):
             win32gui.SendMessage(hwnd, WM_KEYUP, VK_D, lparam_up)
             key_state["D"] = False
 
+def ensure_focus(hwnd):
+    """Brings the window to the foreground if it is not already."""
+    if hwnd is None:
+        return
+    try:
+        foreground_hwnd = win32gui.GetForegroundWindow()
+        if foreground_hwnd != hwnd:
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.15)  # Allow focus transition
+            print("[INFO] Brought target window to foreground.")
+    except Exception as e:
+        print(f"[Warning] Failed to focus window: {e}")
+
 def press_key_f(hwnd):
     """Sends a single keypress of F (down and up) to the window."""
     if hwnd is None:
         return
+    ensure_focus(hwnd)
     lparam_down = 1 | (SCAN_F << 16)
     lparam_up = 1 | (SCAN_F << 16) | (1 << 30) | (1 << 31)
     win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_F, lparam_down)
@@ -118,6 +134,7 @@ def press_key_space(hwnd):
     """Sends a single keypress of Space (down and up) to the window."""
     if hwnd is None:
         return
+    ensure_focus(hwnd)
     lparam_down = 1 | (SCAN_SPACE << 16)
     lparam_up = 1 | (SCAN_SPACE << 16) | (1 << 30) | (1 << 31)
     win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_SPACE, lparam_down)
@@ -129,6 +146,7 @@ def press_key_enter(hwnd):
     """Sends a single keypress of Enter (down and up) to the window."""
     if hwnd is None:
         return
+    ensure_focus(hwnd)
     lparam_down = 1 | (SCAN_ENTER << 16)
     lparam_up = 1 | (SCAN_ENTER << 16) | (1 << 30) | (1 << 31)
     win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_RETURN, lparam_down)
@@ -140,6 +158,7 @@ def press_key_esc(hwnd):
     """Sends a single keypress of ESC (down and up) to the window."""
     if hwnd is None:
         return
+    ensure_focus(hwnd)
     lparam_down = 1 | (SCAN_ESC << 16)
     lparam_up = 1 | (SCAN_ESC << 16) | (1 << 30) | (1 << 31)
     win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_ESCAPE, lparam_down)
@@ -408,8 +427,8 @@ def main():
                 max_val_idle = 0.0
                 max_val_bite = 0.0
                 
-                # Dynamic Optimization: Skip HUD template matching during active CATCHING phase to save CPU and run at maximum speed
-                if current_state != STATE_CATCHING:
+                # Dynamic Optimization: Skip HUD template matching during STRIKING and CATCHING phases to save CPU and run at maximum speed
+                if current_state not in [STATE_STRIKING, STATE_CATCHING]:
                     if template_idle is not None and template_bite is not None:
                         try:
                             hud_grab = np.array(sct.grab(hud_monitor))
@@ -568,8 +587,8 @@ def main():
                         print("\nExiting bot loop...")
                         break
                 
-                # 9. Dynamic Polling Rate: sleep based on active reeling/catching state
-                active_delay = LOOP_DELAY_CATCHING if current_state == STATE_CATCHING else LOOP_DELAY_DEFAULT
+                # 9. Dynamic Polling Rate: sleep based on active reeling/catching/striking state
+                active_delay = LOOP_DELAY_CATCHING if current_state in [STATE_STRIKING, STATE_CATCHING] else LOOP_DELAY_DEFAULT
                 time.sleep(active_delay)
                 
     except KeyboardInterrupt:
