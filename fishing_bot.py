@@ -20,7 +20,7 @@ PROCESS_NAME = "HTGame.exe"
 SHOW_DEBUG_WINDOW = True  # Set to True to show OpenCV visualization
 SAFETY_MARGIN = 6          # Pixels from left/right bounds to start moving
 LOOP_DELAY_DEFAULT = 0.05  # Seconds between frames when idling/waiting (saves CPU)
-LOOP_DELAY_CATCHING = 0.002 # Seconds between frames during active catching (high refresh rate)
+LOOP_DELAY_CATCHING = 0.001 # Seconds between frames during active catching (high refresh rate)
 
 # Reference dimensions (DO NOT CHANGE)
 REF_W = 3440
@@ -45,6 +45,7 @@ VK_D = 0x44
 VK_F = 0x46
 VK_SPACE = 0x20
 VK_RETURN = 0x0D
+VK_ESCAPE = 0x1B
 
 # Scan Codes
 SCAN_A = 0x1E
@@ -52,6 +53,7 @@ SCAN_D = 0x20
 SCAN_F = 0x21
 SCAN_SPACE = 0x39
 SCAN_ENTER = 0x1C
+SCAN_ESC = 0x01
 
 # Win32 Message Constants
 WM_KEYDOWN = 0x0100
@@ -73,7 +75,7 @@ def update_keys(hwnd, a_down, d_down):
     
     # Process 'A' key
     if a_down:
-        if not key_state["A"] or (current_time - last_send_time["A"] > 0.03):
+        if not key_state["A"] or (current_time - last_send_time["A"] > 0.01):
             lparam_down = 1 | (SCAN_A << 16)
             if key_state["A"]:
                 lparam_down |= (1 << 30)
@@ -88,7 +90,7 @@ def update_keys(hwnd, a_down, d_down):
 
     # Process 'D' key
     if d_down:
-        if not key_state["D"] or (current_time - last_send_time["D"] > 0.03):
+        if not key_state["D"] or (current_time - last_send_time["D"] > 0.01):
             lparam_down = 1 | (SCAN_D << 16)
             if key_state["D"]:
                 lparam_down |= (1 << 30)
@@ -133,6 +135,17 @@ def press_key_enter(hwnd):
     time.sleep(0.08)  # brief hold delay
     win32gui.SendMessage(hwnd, WM_KEYUP, VK_RETURN, lparam_up)
     print("[INFO] Hardware-emulated ENTER keypress sent.")
+
+def press_key_esc(hwnd):
+    """Sends a single keypress of ESC (down and up) to the window."""
+    if hwnd is None:
+        return
+    lparam_down = 1 | (SCAN_ESC << 16)
+    lparam_up = 1 | (SCAN_ESC << 16) | (1 << 30) | (1 << 31)
+    win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_ESCAPE, lparam_down)
+    time.sleep(0.08)  # brief hold delay
+    win32gui.SendMessage(hwnd, WM_KEYUP, VK_ESCAPE, lparam_up)
+    print("[INFO] Hardware-emulated ESC keypress sent (End Screen Dismiss).")
 
 def click_window(hwnd, x, y):
     """Sends a mouse click using a hardware cursor teleport-click-restore sequence.
@@ -476,17 +489,8 @@ def main():
                                     
                         elif current_state == STATE_END_SCREEN:
                             if current_time - catching_ended_time >= 5.0:
-                                print("[STATE] End-screen wait completed. Sending click and keyboard fallbacks to clear screen...")
-                                # Click client area center
-                                click_window(hwnd, None, None)
-                                time.sleep(0.15)
-                                # Emulated keyboard fallbacks
-                                press_key_f(hwnd)
-                                time.sleep(0.15)
-                                press_key_space(hwnd)
-                                time.sleep(0.15)
-                                press_key_enter(hwnd)
-                                
+                                print("[STATE] End-screen wait completed. Sending ESC keypress to dismiss screen...")
+                                press_key_esc(hwnd)
                                 current_state = STATE_IDLE
                                 state_cooldown_until = current_time + 2.5  # 2.5s cooldown to let HUD load
                 
