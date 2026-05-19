@@ -359,6 +359,7 @@ def main():
     
     max_val_idle = 0.0
     max_val_bite = 0.0
+    max_val_blue_ring = 0.0
     max_val_banner = 0.0
     
     try:
@@ -401,6 +402,7 @@ def main():
                 img = None
                 max_val_idle = 0.0
                 max_val_bite = 0.0
+                max_val_blue_ring = 0.0
                 max_val_banner = 0.0
                 
                 # 2. Dynamic State-Driven Captures
@@ -507,13 +509,13 @@ def main():
                             if template_bite is not None:
                                 res_bite = cv2.matchTemplate(hud_resized, template_bite, cv2.TM_CCOEFF_NORMED)
                                 _, score_bite, _, _ = cv2.minMaxLoc(res_bite)
-                                max_val_bite = max(max_val_bite, score_bite)
+                                max_val_bite = score_bite
                                 
                             # Match blue-ringed bite
                             if template_bite_blue_ring is not None:
                                 res_blue_ring = cv2.matchTemplate(hud_resized, template_bite_blue_ring, cv2.TM_CCOEFF_NORMED)
                                 _, score_blue_ring, _, _ = cv2.minMaxLoc(res_blue_ring)
-                                max_val_bite = max(max_val_bite, score_blue_ring)
+                                max_val_blue_ring = score_blue_ring
                         except Exception:
                             pass
                             
@@ -548,10 +550,10 @@ def main():
                             print("[STATE] Transitioning to WAITING FOR BITE...")
                             
                         elif current_state == STATE_WAITING_FOR_BITE:
-                            is_bite = (max_val_bite > 0.78) or (max_val_banner > 0.78)
+                            is_bite = (max_val_blue_ring > 0.78) or (max_val_banner > 0.78)
                             if is_bite:
-                                if max_val_bite > 0.78:
-                                    print(f"[STATE] Bite Hook detected ({max_val_bite:.2f})! Striking (Press F)...")
+                                if max_val_blue_ring > 0.78:
+                                    print(f"[STATE] Bite Hook (Blue Ring) detected ({max_val_blue_ring:.2f})! Striking (Press F)...")
                                 else:
                                     print(f"[STATE] Central Banner detected ({max_val_banner:.2f})! Striking (Press F)...")
                                     
@@ -644,7 +646,7 @@ def main():
                     cv2.putText(vis, f"Action: {action}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     
                     # Match correlation diagnostics
-                    cv2.putText(vis, f"Idle Match: {max_val_idle:.2f}  Bite Match: {max_val_bite:.2f}  Banner Match: {max_val_banner:.2f}", 
+                    cv2.putText(vis, f"Idle: {max_val_idle:.2f}  Bite: {max_val_bite:.2f}  Ring: {max_val_blue_ring:.2f}  Banner: {max_val_banner:.2f}", 
                                 (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                     
                     # Draw countdown timer info if in cooldown or waiting
