@@ -459,7 +459,7 @@ def main():
                     
                     if not in_cooldown:
                         if current_state == STATE_IDLE:
-                            if max_val_idle > 0.85:
+                            if max_val_idle > 0.78:
                                 print(f"[STATE] Idle Hook detected ({max_val_idle:.2f}). Casting hook (Press F)...")
                                 press_key_f(hwnd)
                                 current_state = STATE_CASTING
@@ -471,7 +471,7 @@ def main():
                             print("[STATE] Transitioning to WAITING FOR BITE...")
                             
                         elif current_state == STATE_WAITING_FOR_BITE:
-                            if max_val_bite > 0.82:
+                            if max_val_bite > 0.78:
                                 print(f"[STATE] Glowing Bite Hook detected ({max_val_bite:.2f})! Striking (Press F)...")
                                 press_key_f(hwnd)
                                 current_state = STATE_STRIKING
