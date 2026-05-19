@@ -398,6 +398,7 @@ def main():
                 # Initialize detection variables
                 yellow_marker = None
                 green_rect = None
+                img = None
                 max_val_idle = 0.0
                 max_val_bite = 0.0
                 max_val_banner = 0.0
@@ -609,7 +610,7 @@ def main():
                 
                 # 5. Visualization Overlay
                 if SHOW_DEBUG_WINDOW:
-                    if current_state == STATE_CATCHING:
+                    if current_state == STATE_CATCHING and img is not None:
                         vis = img.copy()
                         # Draw Green Bounds
                         if green_rect:
