@@ -41,10 +41,12 @@ UPPER_GREEN = np.array([90, 255, 255])
 # Virtual Keys
 VK_A = 0x41
 VK_D = 0x44
+VK_F = 0x46
 
 # Scan Codes
 SCAN_A = 0x1E
 SCAN_D = 0x20
+SCAN_F = 0x21
 
 # Win32 Message Constants
 WM_KEYDOWN = 0x0100
@@ -93,6 +95,17 @@ def update_keys(hwnd, a_down, d_down):
             lparam_up = 1 | (SCAN_D << 16) | (1 << 30) | (1 << 31)
             win32gui.SendMessage(hwnd, WM_KEYUP, VK_D, lparam_up)
             key_state["D"] = False
+
+def press_key_f(hwnd):
+    """Sends a single keypress of F (down and up) to the window."""
+    if hwnd is None:
+        return
+    lparam_down = 1 | (SCAN_F << 16)
+    lparam_up = 1 | (SCAN_F << 16) | (1 << 30) | (1 << 31)
+    win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_F, lparam_down)
+    time.sleep(0.08)  # brief hold delay
+    win32gui.SendMessage(hwnd, WM_KEYUP, VK_F, lparam_up)
+    print("[INFO] Hardware-emulated F keypress sent (Cast/Strike).")
 
 def click_window(hwnd, x, y):
     """Sends a mouse click using a hardware cursor teleport-click-restore sequence."""
@@ -194,12 +207,32 @@ def on_mouse_click(event, x, y, flags, param):
             should_exit = True
 
 # ==============================================================================
+# ==============================================================================
+# TEMPLATES & STATE MACHINE DEFINITIONS
+# ==============================================================================
+STATE_IDLE = "IDLE"                         # Hook icon is visible, ready to cast
+STATE_CASTING = "CASTING"                   # Temporary state/cooldown after casting
+STATE_WAITING_FOR_BITE = "WAITING_FOR_BITE" # Hook is cast, waiting for fish to bite
+STATE_STRIKING = "STRIKING"                 # Temporary state/cooldown after reel-in key
+STATE_CATCHING = "CATCHING"                 # Keeping the yellow marker inside green bounds
+STATE_END_SCREEN = "END_SCREEN"             # Fishing ended, waiting to click and close
+
+try:
+    template_idle = cv2.imread('resources/hook_idle.png')
+    template_bite = cv2.imread('resources/hook_bite.png')
+    if template_idle is None or template_bite is None:
+        print("[WARNING] Failed to load resources/hook_idle.png or resources/hook_bite.png!")
+        print("Template matching will be unavailable.")
+except Exception as e:
+    print(f"[WARNING] Error loading templates: {e}")
+
+# ==============================================================================
 # MAIN CONTROLLER LOOP
 # ==============================================================================
 def main():
     global bot_active, active_hwnd, should_exit
     print("=========================================================")
-    print("      FISHING BOT (ALWAYS-ON-TOP & TIMER-CLOSE) - NTE    ")
+    print("      FISHING BOT (ALWAYS-ON-TOP & STATE MACHINE) - NTE  ")
     print("=========================================================")
     print("Instructions:")
     print("  1. Press [F9] to Toggle the Bot ON or OFF.")
@@ -220,9 +253,14 @@ def main():
     window_found_last = True
     window_created = False
     
-    # State-based end-screen timer variables
-    last_action_time = 0
-    end_screen_trigger_time = 0
+    # State Machine state variables
+    current_state = STATE_IDLE
+    state_cooldown_until = 0.0
+    catching_lost_detection_start = 0.0
+    catching_ended_time = 0.0
+    
+    max_val_idle = 0.0
+    max_val_bite = 0.0
     
     try:
         with mss.mss() as sct:
@@ -251,6 +289,13 @@ def main():
                 
                 current_time = time.time()
                 
+                # Check if bot is deactivated
+                if not bot_active:
+                    update_keys(hwnd, False, False)
+                    current_state = STATE_IDLE
+                    state_cooldown_until = 0.0
+                    catching_lost_detection_start = 0.0
+                
                 # 2. Capture dynamic ROI (fishing bar)
                 monitor = get_scaled_roi(rect)
                 try:
@@ -268,7 +313,7 @@ def main():
                 yellow_mask = cv2.inRange(hsv, LOWER_YELLOW, UPPER_YELLOW)
                 green_mask = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
                 
-                # 4. Contour detection
+                # 4. Contour detection for fishing bar
                 yellow_contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 green_contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
@@ -294,22 +339,111 @@ def main():
                             max_green_area = area
                             green_rect = (x, y, w, h)
                 
-                # 5. Action Decision Control
-                action = "WAITING"
-                if yellow_marker and green_rect:
-                    yx = yellow_marker[0] + yellow_marker[2] / 2.0
-                    gx_left = green_rect[0]
-                    gx_right = green_rect[0] + green_rect[2]
-                    
-                    if yx < gx_left + SAFETY_MARGIN:
-                        action = "PULL RIGHT"
-                    elif yx > gx_right - SAFETY_MARGIN:
-                        action = "PULL LEFT"
-                    else:
-                        action = "STAY"
+                # 5. Capture resolution-independent HUD ROI (hook area)
+                scale_x = win_w / float(REF_W)
+                scale_y = win_h / float(REF_H)
                 
-                # 6. Apply Key Inputs (if bot is active)
+                hud_w = int(1032 * scale_x)
+                hud_h = int(576 * scale_y)
+                hud_x = int(2408 * scale_x)
+                hud_y = int(864 * scale_y)
+                
+                hud_monitor = {
+                    "top": y1 + hud_y,
+                    "left": x1 + hud_x,
+                    "width": hud_w,
+                    "height": hud_h
+                }
+                
+                max_val_idle = 0.0
+                max_val_bite = 0.0
+                
+                if template_idle is not None and template_bite is not None:
+                    try:
+                        hud_grab = np.array(sct.grab(hud_monitor))
+                        hud_bgr = cv2.cvtColor(hud_grab, cv2.COLOR_BGRA2BGR)
+                        hud_resized = cv2.resize(hud_bgr, (1032, 576), interpolation=cv2.INTER_LINEAR)
+                        
+                        # Match Idle
+                        res_idle = cv2.matchTemplate(hud_resized, template_idle, cv2.TM_CCOEFF_NORMED)
+                        _, max_val_idle, _, _ = cv2.minMaxLoc(res_idle)
+                        
+                        # Match Bite
+                        res_bite = cv2.matchTemplate(hud_resized, template_bite, cv2.TM_CCOEFF_NORMED)
+                        _, max_val_bite, _, _ = cv2.minMaxLoc(res_bite)
+                    except Exception as e:
+                        pass
+                
+                # 6. State Machine Processing (when active)
+                action = "WAITING"
                 if bot_active:
+                    # Smart Start / Autorecovery: if we see minigame active, immediately snap to CATCHING
+                    if current_state in [STATE_IDLE, STATE_WAITING_FOR_BITE] and yellow_marker and green_rect:
+                        print("[STATE] Active minigame detected! Auto-recovering state to CATCHING.")
+                        current_state = STATE_CATCHING
+                        catching_lost_detection_start = 0.0
+                    
+                    # Run state machine FSM
+                    in_cooldown = current_time < state_cooldown_until
+                    
+                    if not in_cooldown:
+                        if current_state == STATE_IDLE:
+                            if max_val_idle > 0.85:
+                                print(f"[STATE] Idle Hook detected ({max_val_idle:.2f}). Casting hook (Press F)...")
+                                press_key_f(hwnd)
+                                current_state = STATE_CASTING
+                                state_cooldown_until = current_time + 2.0  # 2s cooldown for cast
+                                
+                        elif current_state == STATE_CASTING:
+                            # Cooldown has finished, move to waiting
+                            current_state = STATE_WAITING_FOR_BITE
+                            print("[STATE] Transitioning to WAITING FOR BITE...")
+                            
+                        elif current_state == STATE_WAITING_FOR_BITE:
+                            if max_val_bite > 0.82:
+                                print(f"[STATE] Glowing Bite Hook detected ({max_val_bite:.2f})! Striking (Press F)...")
+                                press_key_f(hwnd)
+                                current_state = STATE_STRIKING
+                                state_cooldown_until = current_time + 2.5  # 2.5s strike cooldown to let bar appear
+                                
+                        elif current_state == STATE_STRIKING:
+                            # Strike cooldown finished, enter catching phase
+                            current_state = STATE_CATCHING
+                            catching_lost_detection_start = 0.0
+                            print("[STATE] Entering minigame CATCHING state...")
+                            
+                        elif current_state == STATE_CATCHING:
+                            if yellow_marker and green_rect:
+                                catching_lost_detection_start = 0.0  # Reset lost detection
+                                yx = yellow_marker[0] + yellow_marker[2] / 2.0
+                                gx_left = green_rect[0]
+                                gx_right = green_rect[0] + green_rect[2]
+                                
+                                if yx < gx_left + SAFETY_MARGIN:
+                                    action = "PULL RIGHT"
+                                elif yx > gx_right - SAFETY_MARGIN:
+                                    action = "PULL LEFT"
+                                else:
+                                    action = "STAY"
+                            else:
+                                # Lost detection temporarily, check if sustained
+                                if catching_lost_detection_start == 0.0:
+                                    catching_lost_detection_start = current_time
+                                elif current_time - catching_lost_detection_start >= 1.5:
+                                    print("[STATE] Fishing minigame ended (detection lost). Transitioning to END_SCREEN...")
+                                    update_keys(hwnd, False, False)
+                                    current_state = STATE_END_SCREEN
+                                    catching_ended_time = current_time
+                                    
+                        elif current_state == STATE_END_SCREEN:
+                            if current_time - catching_ended_time >= 5.0:
+                                print("[STATE] End-screen wait completed. Sending hardware click to clear screen...")
+                                click_window(hwnd, win_w // 2, win_h // 2)
+                                current_state = STATE_IDLE
+                                state_cooldown_until = current_time + 2.5  # 2.5s cooldown to let HUD load
+                
+                # 7. Apply Key Inputs (if in Catching phase and active)
+                if bot_active and current_state == STATE_CATCHING:
                     if action == "PULL LEFT":
                         update_keys(hwnd, True, False)
                     elif action == "PULL RIGHT":
@@ -318,29 +452,6 @@ def main():
                         update_keys(hwnd, False, False)
                 else:
                     update_keys(hwnd, False, False)
-                
-                # 7. End Screen Auto-Closure (State-based Timer)
-                if bot_active:
-                    # Update active time if we are in the minigame (either pulling or staying)
-                    if action != "WAITING":
-                        last_action_time = current_time
-                    # If we are waiting, check if we were recently in a minigame (within the last 3s)
-                    elif last_action_time > 0:
-                        if current_time - last_action_time < 3.0:
-                            # Schedule a click in 5.0 seconds
-                            end_screen_trigger_time = current_time + 5.0
-                            print(f"[INFO] Fishing minigame ended. Auto-click scheduled in 5.0 seconds...")
-                        last_action_time = 0 # Disarm to trigger only once per game
-                    
-                    # Fire hardware click when timer expires
-                    if end_screen_trigger_time > 0 and current_time >= end_screen_trigger_time:
-                        print(f"[INFO] Timer expired! Sending hardware click to center of game window...")
-                        click_window(hwnd, win_w // 2, win_h // 2)
-                        end_screen_trigger_time = 0  # Reset
-                else:
-                    # Reset states if bot is deactivated
-                    last_action_time = 0
-                    end_screen_trigger_time = 0
                 
                 # 8. Visualization Overlay
                 if SHOW_DEBUG_WINDOW:
@@ -371,12 +482,21 @@ def main():
                     status_text = "BOT ACTIVE (ON)" if bot_active else "BOT STANDBY (OFF)"
                     
                     cv2.putText(vis, f"Status: {status_text} (Press F9)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
-                    cv2.putText(vis, f"Action: {action}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.putText(vis, f"State: {current_state}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(vis, f"Action: {action}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     
-                    # Draw scheduler info if armed
-                    if bot_active and end_screen_trigger_time > 0:
-                        remaining = max(0.0, end_screen_trigger_time - current_time)
-                        cv2.putText(vis, f"Auto-Click in: {remaining:.1f}s", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    # Match correlation diagnostics
+                    cv2.putText(vis, f"Idle Match: {max_val_idle:.2f}  Bite Match: {max_val_bite:.2f}", 
+                                (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                    
+                    # Draw countdown timer info if in cooldown or waiting
+                    if bot_active:
+                        if current_time < state_cooldown_until:
+                            rem = max(0.0, state_cooldown_until - current_time)
+                            cv2.putText(vis, f"Cooldown: {rem:.1f}s", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+                        elif current_state == STATE_END_SCREEN:
+                            rem = max(0.0, 5.0 - (current_time - catching_ended_time))
+                            cv2.putText(vis, f"Auto-Click in: {rem:.1f}s", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                     
                     # Resize to half footprint
                     debug_show = cv2.resize(vis, (REF_ROI_W // 2, REF_ROI_H // 2))
