@@ -19,7 +19,8 @@ WINDOW_TITLE = "NTE  "
 PROCESS_NAME = "HTGame.exe"
 SHOW_DEBUG_WINDOW = True  # Set to True to show OpenCV visualization
 SAFETY_MARGIN = 6          # Pixels from left/right bounds to start moving
-LOOP_DELAY = 0.01          # Seconds between frames (higher speed = more responsive)
+LOOP_DELAY_DEFAULT = 0.05  # Seconds between frames when idling/waiting (saves CPU)
+LOOP_DELAY_CATCHING = 0.002 # Seconds between frames during active catching (high refresh rate)
 
 # Reference dimensions (DO NOT CHANGE)
 REF_W = 3440
@@ -42,11 +43,15 @@ UPPER_GREEN = np.array([90, 255, 255])
 VK_A = 0x41
 VK_D = 0x44
 VK_F = 0x46
+VK_SPACE = 0x20
+VK_RETURN = 0x0D
 
 # Scan Codes
 SCAN_A = 0x1E
 SCAN_D = 0x20
 SCAN_F = 0x21
+SCAN_SPACE = 0x39
+SCAN_ENTER = 0x1C
 
 # Win32 Message Constants
 WM_KEYDOWN = 0x0100
@@ -105,34 +110,66 @@ def press_key_f(hwnd):
     win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_F, lparam_down)
     time.sleep(0.08)  # brief hold delay
     win32gui.SendMessage(hwnd, WM_KEYUP, VK_F, lparam_up)
-    print("[INFO] Hardware-emulated F keypress sent (Cast/Strike).")
+    print("[INFO] Hardware-emulated F keypress sent (Cast/Strike/Dismiss).")
+
+def press_key_space(hwnd):
+    """Sends a single keypress of Space (down and up) to the window."""
+    if hwnd is None:
+        return
+    lparam_down = 1 | (SCAN_SPACE << 16)
+    lparam_up = 1 | (SCAN_SPACE << 16) | (1 << 30) | (1 << 31)
+    win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_SPACE, lparam_down)
+    time.sleep(0.08)  # brief hold delay
+    win32gui.SendMessage(hwnd, WM_KEYUP, VK_SPACE, lparam_up)
+    print("[INFO] Hardware-emulated SPACE keypress sent.")
+
+def press_key_enter(hwnd):
+    """Sends a single keypress of Enter (down and up) to the window."""
+    if hwnd is None:
+        return
+    lparam_down = 1 | (SCAN_ENTER << 16)
+    lparam_up = 1 | (SCAN_ENTER << 16) | (1 << 30) | (1 << 31)
+    win32gui.SendMessage(hwnd, WM_KEYDOWN, VK_RETURN, lparam_down)
+    time.sleep(0.08)  # brief hold delay
+    win32gui.SendMessage(hwnd, WM_KEYUP, VK_RETURN, lparam_up)
+    print("[INFO] Hardware-emulated ENTER keypress sent.")
 
 def click_window(hwnd, x, y):
-    """Sends a mouse click using a hardware cursor teleport-click-restore sequence."""
+    """Sends a mouse click using a hardware cursor teleport-click-restore sequence.
+       Treats coordinates as client area relative; if x and y are None, clicks center."""
     if hwnd is None:
         return
     try:
-        # Try to bring window to foreground in case it lost focus
+        # Try to bring window to foreground and restore it
         foreground_hwnd = win32gui.GetForegroundWindow()
         if foreground_hwnd != hwnd:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(hwnd)
-            time.sleep(0.1)  # Give Windows time to switch focus
+            time.sleep(0.2)  # Give Windows time to switch focus
             
-        rect = win32gui.GetWindowRect(hwnd)
-        x1, y1, x2, y2 = rect
-        cx = x1 + x
-        cy = y1 + y
+        client_rect = win32gui.GetClientRect(hwnd)
+        cl_w = client_rect[2]
+        cl_h = client_rect[3]
+        
+        # Determine client x, y targets
+        cx_val = x if x is not None else cl_w // 2
+        cy_val = y if y is not None else cl_h // 2
+        
+        # Convert to screen coordinates
+        cx, cy = win32gui.ClientToScreen(hwnd, (cx_val, cy_val))
         
         # Save, Click, and Restore
         orig_x, orig_y = win32gui.GetCursorPos()
         win32gui.SetCursorPos((cx, cy))
-        time.sleep(0.02)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.05)
+        
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.20)  # Robust 200ms hold delay for UE5
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-        time.sleep(0.02)
+        time.sleep(0.05)
+        
         win32gui.SetCursorPos((orig_x, orig_y))
-        print(f"[INFO] Hardware auto-click sent at screen ({cx}, {cy}) / window ({x}, {y}).")
+        print(f"[INFO] Hardware client-click sent at screen ({cx}, {cy}) / client ({cx_val}, {cy_val}).")
     except Exception as e:
         print(f"[Warning] Click failed: {e}")
 
@@ -358,21 +395,23 @@ def main():
                 max_val_idle = 0.0
                 max_val_bite = 0.0
                 
-                if template_idle is not None and template_bite is not None:
-                    try:
-                        hud_grab = np.array(sct.grab(hud_monitor))
-                        hud_bgr = cv2.cvtColor(hud_grab, cv2.COLOR_BGRA2BGR)
-                        hud_resized = cv2.resize(hud_bgr, (1032, 576), interpolation=cv2.INTER_LINEAR)
-                        
-                        # Match Idle
-                        res_idle = cv2.matchTemplate(hud_resized, template_idle, cv2.TM_CCOEFF_NORMED)
-                        _, max_val_idle, _, _ = cv2.minMaxLoc(res_idle)
-                        
-                        # Match Bite
-                        res_bite = cv2.matchTemplate(hud_resized, template_bite, cv2.TM_CCOEFF_NORMED)
-                        _, max_val_bite, _, _ = cv2.minMaxLoc(res_bite)
-                    except Exception as e:
-                        pass
+                # Dynamic Optimization: Skip HUD template matching during active CATCHING phase to save CPU and run at maximum speed
+                if current_state != STATE_CATCHING:
+                    if template_idle is not None and template_bite is not None:
+                        try:
+                            hud_grab = np.array(sct.grab(hud_monitor))
+                            hud_bgr = cv2.cvtColor(hud_grab, cv2.COLOR_BGRA2BGR)
+                            hud_resized = cv2.resize(hud_bgr, (1032, 576), interpolation=cv2.INTER_LINEAR)
+                            
+                            # Match Idle
+                            res_idle = cv2.matchTemplate(hud_resized, template_idle, cv2.TM_CCOEFF_NORMED)
+                            _, max_val_idle, _, _ = cv2.minMaxLoc(res_idle)
+                            
+                            # Match Bite
+                            res_bite = cv2.matchTemplate(hud_resized, template_bite, cv2.TM_CCOEFF_NORMED)
+                            _, max_val_bite, _, _ = cv2.minMaxLoc(res_bite)
+                        except Exception as e:
+                            pass
                 
                 # 6. State Machine Processing (when active)
                 action = "WAITING"
@@ -437,8 +476,17 @@ def main():
                                     
                         elif current_state == STATE_END_SCREEN:
                             if current_time - catching_ended_time >= 5.0:
-                                print("[STATE] End-screen wait completed. Sending hardware click to clear screen...")
-                                click_window(hwnd, win_w // 2, win_h // 2)
+                                print("[STATE] End-screen wait completed. Sending click and keyboard fallbacks to clear screen...")
+                                # Click client area center
+                                click_window(hwnd, None, None)
+                                time.sleep(0.15)
+                                # Emulated keyboard fallbacks
+                                press_key_f(hwnd)
+                                time.sleep(0.15)
+                                press_key_space(hwnd)
+                                time.sleep(0.15)
+                                press_key_enter(hwnd)
+                                
                                 current_state = STATE_IDLE
                                 state_cooldown_until = current_time + 2.5  # 2.5s cooldown to let HUD load
                 
@@ -516,7 +564,9 @@ def main():
                         print("\nExiting bot loop...")
                         break
                 
-                time.sleep(LOOP_DELAY)
+                # 9. Dynamic Polling Rate: sleep based on active reeling/catching state
+                active_delay = LOOP_DELAY_CATCHING if current_state == STATE_CATCHING else LOOP_DELAY_DEFAULT
+                time.sleep(active_delay)
                 
     except KeyboardInterrupt:
         print("\nStopping bot...")
